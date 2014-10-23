@@ -26,7 +26,12 @@ module VagrantPlugins
           raise Errors::VSphereError, :'invalid_base_path' if vm_base_folder.nil?
 
           begin
-            location = get_location connection, machine, config, template
+# Storage DRS does not support vSphere linked clones. http://www.vmware.com/files/pdf/techpaper/vsphere-storage-drs-interoperability.pdf
+            ds = get_datastore dc, machine
+            raise Errors::VSphereError, :'invalid_configuration_linked_clone_with_sdrs' if config.linked_clone and datastore.is_a? RbVmomi::VIM::StoragePod
+
+            compute = get_compute_resource(dc, machine) unless config.clone_from_vm and not datastore.is_a? RbVmomi::VIM::StoragePod
+            location = get_location ds, compute, machine, config, template
             spec = RbVmomi::VIM.VirtualMachineCloneSpec :location => location, :powerOn => true, :template => false
             spec[:config] = RbVmomi::VIM.VirtualMachineConfigSpec
             customization_info = get_customization_spec_info_by_name connection, machine
@@ -35,14 +40,23 @@ module VagrantPlugins
             add_custom_vlan(template, dc, spec, config.vlan) unless config.vlan.nil?
             add_custom_memory(spec, config.memory_mb) unless config.memory_mb.nil?
 
-            env[:ui].info I18n.t('vsphere.creating_cloned_vm')
-            env[:ui].info " -- #{config.clone_from_vm ? "Source" : "Template"} VM: #{template.pretty_path}"
-            env[:ui].info " -- Target VM: #{vm_base_folder.pretty_path}/#{name}"
+            if !config.clone_from_vm and ds.is_a? RbVmomi::VIM::StoragePod
+              env[:ui].info I18n.t('vsphere.creating_cloned_vm')
+              env[:ui].info " -- Template VM: #{template.pretty_path}"
+              env[:ui].info " -- Target VM: #{vm_base_folder.pretty_path}/#{name}"
 
-            new_vm = template.CloneVM_Task(:folder => vm_base_folder, :name => name, :spec => spec).wait_for_completion
+              new_vm = ClusterClone( connection, ds, template, vm_base_folder, name, spec)
+            else
+              env[:ui].info I18n.t('vsphere.creating_cloned_vm')
+              env[:ui].info " -- #{config.clone_from_vm ? "Source" : "Template"} VM: #{template.pretty_path}"
+              env[:ui].info " -- Target VM: #{vm_base_folder.pretty_path}/#{name}"
+
+              new_vm = template.CloneVM_Task(:folder => vm_base_folder, :name => name, :spec => spec).wait_for_completion
+            end
           rescue Errors::VSphereError => e
             raise
           rescue Exception => e
+            puts "Backtrace:\n\t#{e.backtrace.join("\n\t")}"
             raise Errors::VSphereError.new, e.message
           end
 
@@ -78,7 +92,7 @@ module VagrantPlugins
           customization_spec
         end
 
-        def get_location(connection, machine, config, template)
+        def get_location(datastore, compute, machine, config, template)
           if config.linked_clone
             # The API for linked clones is quite strange. We can't create a linked
             # straight from any VM. The disks of the VM for which we can create a
@@ -111,13 +125,15 @@ module VagrantPlugins
             end
 
             location = RbVmomi::VIM.VirtualMachineRelocateSpec(:diskMoveType => :moveChildMostDiskBacking)
+
+          elsif datastore.is_a? RbVmomi::VIM::StoragePod
+            location = RbVmomi::VIM.VirtualMachineRelocateSpec
           else
             location = RbVmomi::VIM.VirtualMachineRelocateSpec
 
-            datastore = get_datastore connection, machine
             location[:datastore] = datastore unless datastore.nil?
           end
-          location[:pool] = get_resource_pool(connection, machine) unless config.clone_from_vm
+          location[:pool] = get_resource_pool(compute, machine) unless config.clone_from_vm
           location
         end
 

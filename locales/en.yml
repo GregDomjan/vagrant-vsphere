@@ -44,6 +44,9 @@ en:
         Configured vlan not found
       missing_network_card: |-
         Cannot find network card to customize
+      invalid_configuration_linked_clone_with_sdrs: |-
+        Cannot use Linked Clone with Storage DRS
+
     config:
       host: |-
         Configuration must specify a vSphere host
